@@ -27,6 +27,9 @@ def main():
                         dest='subject_tmpl')
     parser.add_argument('--dry-run', action='store_true', default=False,
                         help='only report what would be done')
+    parser.add_argument('--server', action='store', default='production',
+                        choices=['staging', 'qastaging', 'production'],
+                        help='Launchpad server to use.')
     parser.add_argument('project', action='store', default=None,
                         help='The project to use.')
     parser.add_argument('version', action='store', default=None,
@@ -42,7 +45,7 @@ def main():
         sys.exit(1)
 
     lp = Launchpad.login_with(
-        "uss-tableflip lp-bugs-released", 'production', version='devel')
+        "uss-tableflip lp-bugs-released", args.server, version='devel')
 
     project_name = args.project
     # lp_project = lp.projects(project_name)
