@@ -110,12 +110,14 @@ class CachedDict:
         self._save_cache()
 
 
-def get_old_version() -> str:
+def get_old_version(cache) -> str:
     likely_old_version = sh(
         "git describe --tags " "$(git log --grep='Release' -1 --pretty=format:'%h')"
     )
     response = input(f"Old version ({likely_old_version}): ")
-    return response.strip() if response.strip() else likely_old_version
+    old_version = response.strip() if response.strip() else likely_old_version
+    cache["old_version"] = old_version
+    return old_version
 
 
 def get_release_version(old_version: str) -> str:
@@ -162,21 +164,21 @@ def check_changelog():
         sys.exit(1)
 
 
-def checkout_master_and_pull():
-    if sh("git branch --show-current") != "master":
-        response = input("Change current branch to master (Y/n)? ")
-        if affirmative(response):
+def checkout_main_and_pull():
+    if sh("git branch --show-current") != "main":
+        response = input("Change current branch to main (Y/n)? ")
+        if not affirmative(response):
             print(
-                "Change branch to master and pull upstream commits "
+                "Change branch to main and pull upstream commits "
                 "before running this script"
             )
             sys.exit(1)
         sh("git fetch")
-        sh("git checkout master")
+        sh("git checkout main")
 
     if sh("git rev-parse HEAD") != sh("git rev-parse @{u}"):
         response = input("Pull latest upstream (Y/n)? ")
-        if affirmative(response):
+        if not affirmative(response):
             print("Pull upstream commits before running this script")
             sys.exit(1)
         sh("git pull")
@@ -232,7 +234,7 @@ def create_release_bug(old_version, release_version):
 
 def prepare_git_branch(old_version, release_version, bug_id, changelog):
     check_changelog()
-    checkout_master_and_pull()
+    checkout_main_and_pull()
 
     response = input("Create new release branch (Y/n)? ")
     if affirmative(response):
@@ -247,7 +249,7 @@ def prepare_git_branch(old_version, release_version, bug_id, changelog):
         with open("ChangeLog", "r+") as f:
             content = f.read()
             f.seek(0, 0)
-            f.write(f"{release_version}\n{changelog}\n{content}\n")
+            f.write(f"{release_version}\n{changelog}\n\n{content}")
         sh(f'sed -i "s/{old_version}/{release_version}/" cloudinit/version.py')
         while not bug_id:
             bug_id = input(
@@ -364,6 +366,7 @@ def upload_to_github(tarball_path, release_version):
     signature_path = f"{tarball_path}.asc"
     github_token = os.environ.get('GITHUB_TOKEN')
     if not github_token:
+        # TODO...THIS DOESN'T SEEM TO BE WORKING!
         github_token = input('Enter Github token: ').strip()
 
     response = requests.post(
@@ -425,17 +428,24 @@ def create_new_milestone(release_version, series):
 
 
 def build_and_upload(lp, release_version, bug_id):
-    response = input("Build tarball and upload to Launchpad and Github (Y/n)? ")
+    response = input("Build tarball for upload (Y/n)? ")
+    # TODO...cache results of build
     if affirmative(response):
         series = get_series(lp.projects(PROJECT), release_version)
         tarball_path = build_tarball_and_sign()
-        upload_to_launchpad(tarball_path, release_version, bug_id, series)
-        upload_to_github(tarball_path, release_version)
-        create_new_milestone(release_version, series)
+        response = input("Upload to launchpad (Y/n)? ")
+        if affirmative(response):
+            upload_to_launchpad(tarball_path, release_version, bug_id, series)
+        response = input("Create new milestone on launchpad? (Y/n) ")
+        if affirmative(response):
+            create_new_milestone(release_version, series)
+        response = input("Upload to Github (requires Github TOKEN) (Y/n)?" )
+        if affirmative(response):
+            upload_to_github(tarball_path, release_version)
 
 
 def tag_release(release_version):
-    # Check that we're on master and (maybe) no changes
+    # Check that we're on main and (maybe) no changes
     response = input(f"Tag {release_version} release and push to github (Y/n)? ")
     if affirmative(response):
         tag_cmd = "git tag --annotate --sign -m 'Release {0}' {0}".format(
@@ -447,10 +457,10 @@ def tag_release(release_version):
         if (
             f"Release {release_version}"
             not in sh("git show HEAD --pretty=oneline --no-patch")
-            or sh("git rev-parse --abbrev-ref HEAD") != "master"
+            or sh("git rev-parse --abbrev-ref HEAD") != "main"
         ):
             print(
-                "HEAD must be the release commit on master before tagging. "
+                "HEAD must be the release commit on main before tagging. "
                 "Re-run script when fixed or run the following manually:\n"
                 f"{tag_cmd}\n"
                 f"{push_cmd}"
@@ -493,7 +503,7 @@ def upload_copr(cache):
                 "--artifacts=./srpm/ rockylinux/8"
             )
             output_name = build_output.split("redhat package '")[1][:-1]
-            package_name = f"./srpm/{Path(output_name).stem}"
+            package_name = f"./srpm/{Path(output_name).stem}/.rpm"
             cache["rpm_path"] = package_name
 
         try:
@@ -532,14 +542,14 @@ def main():
         args.stage in ["all", "create-release-bug", "prepare-git-branch"]
         and cache["premerge-complete"] is not True
     ):
-        old_version = cache["old_version"] or get_old_version()
+        old_version = cache["old_version"] or get_old_version(cache)
         if args.stage in ["all", "create-release-bug"]:
             bug_id, changelog = create_release_bug(old_version, release_version)
             cache["bug_id"] = bug_id
             cache["changelog"] = changelog
         if args.stage in ["all", "prepare-git-branch"]:
             prepare_git_branch(
-                old_version, release_version, cache["bug_id"], cache["changelog"]
+                old_version, release_version, int(cache["bug_id"]), cache["changelog"]
             )
         if args.stage in ["all", "create-release-bug", "prepare-git-branch"]:
             print("Now push your branch and nag a teammate to review it")
@@ -560,14 +570,14 @@ def main():
         if response.lower() != "y":
             print("Re-run script once branch has been merged")
             sys.exit(1)
-
+    checkout_main_and_pull()
     lp = launchpad_login()
 
     if args.stage in ["all", "tag-release"]:
         tag_release(release_version)
 
     if args.stage in ["all", "build-and-upload"]:
-        build_and_upload(lp, release_version, cache["bug_id"])
+        build_and_upload(lp, release_version, int(cache["bug_id"]))
 
     if args.stage in ["all", "close-all-bugs"]:
         close_all_bugs(cache["old_version"], release_version)
@@ -576,7 +586,7 @@ def main():
         upload_copr(cache)
 
     if args.stage in ["all", "email"]:
-        bug_description = lp.bugs.getBugData(bug_id=cache["bug_id"])[0]["description"]
+        bug_description = lp.bugs.getBugData(bug_id=int(cache["bug_id"]))[0]["description"]
         email = "\n".join(bug_description.splitlines()[2:]).replace(
             "== Changelog ==",
             "Thank you for your contributions,\nThe cloud-init team\n\n"
